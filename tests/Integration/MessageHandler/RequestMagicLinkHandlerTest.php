@@ -8,6 +8,7 @@ use App\Entity\MagicLinkToken;
 use App\Entity\User;
 use App\Message\RequestMagicLink;
 use App\MessageHandler\RequestMagicLinkHandler;
+use App\Services\Auth\SignInAllowlist;
 use App\Tests\IntegrationTestCase;
 use Doctrine\ORM\EntityManagerInterface;
 use Ramsey\Uuid\Uuid;
@@ -120,5 +121,27 @@ final class RequestMagicLinkHandlerTest extends IntegrationTestCase
         $token = $em->find(MagicLinkToken::class, $tokenId);
 
         self::assertNull($token);
+    }
+
+    public function testAnAddressOutsideTheAllowlistIsSentNothing(): void
+    {
+        self::getContainer()->set(SignInAllowlist::class, new SignInAllowlist('owner@example.com', ''));
+
+        $handler = self::getContainer()->get(RequestMagicLinkHandler::class);
+        assert($handler instanceof RequestMagicLinkHandler);
+
+        $tokenId = Uuid::uuid7();
+
+        $handler(new RequestMagicLink(
+            tokenId: $tokenId,
+            email: 'stranger-'.$tokenId->toString().'@example.com',
+        ));
+
+        $em = $this->getService(EntityManagerInterface::class);
+
+        self::assertNull(
+            $em->find(MagicLinkToken::class, $tokenId),
+            'A stranger who reaches a self-hosted instance must get no token and no email. Sign-in and registration are one request, so a delivered link is an account — and the caller cannot tell this apart from success, which is what stops the endpoint from reporting who is allowed in.',
+        );
     }
 }

@@ -8,6 +8,7 @@ use App\Entity\MagicLinkToken;
 use App\Message\RequestMagicLink;
 use App\Repository\MagicLinkTokenRepository;
 use App\Repository\UserRepository;
+use App\Services\Auth\SignInAllowlist;
 use App\Services\MagicLinkAbuseMonitor;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Clock\ClockInterface;
@@ -32,11 +33,20 @@ final readonly class RequestMagicLinkHandler
         private ClockInterface $clock,
         private Environment $twig,
         private MagicLinkAbuseMonitor $abuseMonitor,
+        private SignInAllowlist $allowlist,
     ) {
     }
 
     public function __invoke(RequestMagicLink $message): void
     {
+        // Before anything is written or sent: a blocked address leaves no token
+        // row and no abuse-monitor trail, and the caller cannot tell it apart
+        // from a delivered link — LoginController already answers every outcome
+        // with the same "check your email" page.
+        if (!$this->allowlist->permits($message->email)) {
+            return;
+        }
+
         $now = $this->clock->now();
         $oneHourAgo = $now->modify('-1 hour');
 

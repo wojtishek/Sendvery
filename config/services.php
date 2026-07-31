@@ -253,6 +253,9 @@ return App::config([
                 'alias' => 'App\Services\Mail\FakeMailClient',
                 'public' => true,
             ],
+            'App\Services\Auth\SignInAllowlist' => [
+                'public' => true,
+            ],
             'App\Services\Mail\ImapMailClient' => [
                 'public' => true,
             ],
