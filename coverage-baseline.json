@@ -120,7 +120,6 @@
         "src/Services/Dns/FakeSmtpProbe.php": 1,
         "src/Services/Dns/FakeSpfResolver.php": 4,
         "src/Services/Dns/RuaMailboxMatcher.php": 1,
-        "src/Services/Dns/SocketSmtpProbe.php": 1,
         "src/Services/Dns/SpfChecker.php": 46,
         "src/Services/Github/FileGetContentsGithubApiClient.php": 38,
         "src/Services/IngestionHealthReader.php": 1,

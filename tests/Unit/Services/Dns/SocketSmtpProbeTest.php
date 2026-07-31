@@ -60,7 +60,7 @@ final class FakeMailHost
     /** @var array<string, string> address => scripted server side of the conversation */
     private static array $conversations = [];
 
-    /** @var list<resource> server ends, held open so the probe's writes are not a broken pipe */
+    /** @var array<string, resource> address => server end, held open so the probe's writes are not a broken pipe */
     private static array $serverEnds = [];
 
     public static function reset(): void
@@ -79,6 +79,23 @@ final class FakeMailHost
     public static function answersAt(string $address, string $conversation = "220 mx.example.test ESMTP\r\n250-mx.example.test\r\n250 STARTTLS\r\n"): void
     {
         self::$conversations[$address] = $conversation;
+    }
+
+    /**
+     * Everything the probe wrote on the wire. The probe closes its own end
+     * before a test asks, so the server end reads to EOF instead of blocking.
+     */
+    public static function heardAt(string $address): string
+    {
+        $serverEnd = self::$serverEnds[$address] ?? null;
+
+        if (!is_resource($serverEnd)) {
+            return '';
+        }
+
+        stream_set_blocking($serverEnd, false);
+
+        return (string) stream_get_contents($serverEnd);
     }
 
     /**
@@ -102,7 +119,7 @@ final class FakeMailHost
         }
 
         fwrite($pair[1], $conversation);
-        self::$serverEnds[] = $pair[1];
+        self::$serverEnds[$address] = $pair[1];
 
         return $pair[0];
     }
@@ -135,9 +152,9 @@ final class SocketSmtpProbeTest extends TestCase
         );
         self::assertTrue($result->tlsSupported, 'The EHLO conversation must reach the same host the banner came from.');
         self::assertSame(
-            ['[2001:db8::25]', '[2001:db8::25]'],
+            ['[2001:db8::25]'],
             FakeMailHost::$dialled,
-            'Both the banner read and the STARTTLS probe have to bracket the literal; fixing only one leaves TLS support permanently unknown.',
+            'The literal has to be bracketed; leaving it bare leaves TLS support permanently unknown.',
         );
     }
 
@@ -150,7 +167,7 @@ final class SocketSmtpProbeTest extends TestCase
 
         self::assertTrue($result->reachable);
         self::assertSame(
-            ['203.0.113.25', '203.0.113.25'],
+            ['203.0.113.25'],
             FakeMailHost::$dialled,
             'Bracketing an IPv4 address would break every mail host we can currently reach.',
         );
@@ -184,5 +201,50 @@ final class SocketSmtpProbeTest extends TestCase
 
         self::assertTrue($result->reachable);
         self::assertFalse($result->tlsSupported);
+    }
+
+    /**
+     * A greeting may span several lines, and Postfix's postscreen makes that the
+     * common case: it answers with a partial `220-` line, then withholds the
+     * final `220 ` line while it runs its deep protocol tests. Reading one line
+     * and speaking immediately is what postscreen logs as PREGREET and scores as
+     * a spambot.
+     */
+    #[Test]
+    public function aGreetingSpreadOverSeveralLinesIsReadToItsEndBeforeWeSpeak(): void
+    {
+        FakeMailHost::answersAt(
+            '203.0.113.27',
+            "220-mx.example.test ESMTP Postfix\r\n220 mx.example.test ready\r\n250-mx.example.test\r\n250 STARTTLS\r\n",
+        );
+
+        $result = (new SocketSmtpProbe())->probe('203.0.113.27');
+
+        self::assertTrue($result->reachable);
+        self::assertTrue(
+            $result->tlsSupported,
+            'Stopping at the first greeting line leaves the rest of the banner in the buffer, where it is then read as '
+            .'the EHLO response — so STARTTLS goes unseen and a perfectly modern mail server is reported as offering no TLS.',
+        );
+    }
+
+    #[Test]
+    public function theProbeGreetsAndSignsOffOnASingleConnection(): void
+    {
+        FakeMailHost::answersAt('203.0.113.28');
+
+        (new SocketSmtpProbe())->probe('203.0.113.28');
+
+        self::assertSame(
+            ['203.0.113.28'],
+            FakeMailHost::$dialled,
+            'Reading the banner on one connection and running EHLO on a second doubles our footprint on every mail host '
+            .'we measure, and the banner-only connection is dropped mid-test — which postscreen records as a HANGUP.',
+        );
+        self::assertSame(
+            "EHLO sendvery.com\r\nQUIT\r\n",
+            FakeMailHost::heardAt('203.0.113.28'),
+            'A probe that walks away without QUIT is scored as an abandoned session by the host it just measured.',
+        );
     }
 }
