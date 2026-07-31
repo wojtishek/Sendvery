@@ -5,6 +5,13 @@
 services:
   app:
     build: .
+    # Production secrets live in .env.local, which .dockerignore deliberately
+    # keeps out of the image. Symfony would read the file itself if it were
+    # there — it is not, so compose has to inject it. Absent in dev, where .env
+    # already supplies every default.
+    env_file:
+      - path: .env.local
+        required: false
     depends_on:
       database:
         condition: service_healthy
@@ -28,9 +35,23 @@ services:
   worker:
     build: .
     command: php bin/console messenger:consume async --time-limit=3600
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      # app already migrates on startup. Left unset, both containers reach for
+      # the same lock at the same moment, and --all-or-nothing does not make
+      # that safe — it only decides how the loser fails.
+      SKIP_DATABASE_MIGRATIONS: "true"
     depends_on:
       database:
         condition: service_healthy
+    # The base image probes the web server this container does not run, so the
+    # worker reports unhealthy for its entire life. A permanent red light hides
+    # the one it should have shown: a worker that actually died, taking
+    # magic-link sign-in with it.
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   database:
