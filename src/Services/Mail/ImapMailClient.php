@@ -64,7 +64,11 @@ final readonly class ImapMailClient implements MailClient
                     messageId: $message->getMessageId()->toString(),
                     subject: $message->getSubject()->toString(),
                     from: $message->getFrom()->first()->mail ?? '',
-                    date: $message->getDate()->first()?->toDate() ?? new \DateTimeImmutable(),
+                    // Shared with the central inbox for the same reason
+                    // rawEml is, and for a reason discovered the hard way:
+                    // deriving it here instead is what made every BYO poll
+                    // throw on the first message that carried a Date header.
+                    date: ImapCentralInboxClient::receivedAt($message),
                     attachments: $attachments,
                     // Shared with the central inbox rather than reimplemented:
                     // Webklex's getRawBody() drops the headers, and a blob

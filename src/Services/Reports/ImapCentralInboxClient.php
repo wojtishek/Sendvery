@@ -256,6 +256,30 @@ final class ImapCentralInboxClient implements CentralInboxClient
         return $message->getHeader()?->raw."\r\n\r\n".$message->getRawBody();
     }
 
+    /**
+     * The received date, immutable, from a fetched Message.
+     *
+     * Webklex hands back whatever the Date header parsed to — Carbon in
+     * practice — and Carbon::toDate() returns a mutable \DateTime. Both
+     * ingestion paths store an immutable one, and this conversion was written
+     * twice: the central inbox did it, the BYO poller did not, and every BYO
+     * poll died with a TypeError on the first message carrying a Date header.
+     *
+     * The `?? new \DateTimeImmutable()` in the copy that failed reads like it
+     * covers exactly this and does not — it fires only when the header is
+     * absent, which is the one case that was never the problem.
+     *
+     * Shared for the same reason fullRawEml() is.
+     */
+    public static function receivedAt(Message $message): \DateTimeImmutable
+    {
+        $dateFirst = $message->getDate()->first();
+
+        return is_object($dateFirst) && method_exists($dateFirst, 'toDate')
+            ? \DateTimeImmutable::createFromInterface($dateFirst->toDate())
+            : new \DateTimeImmutable();
+    }
+
     private function envelopeFromMessage(Message $message, ?int $uidvalidity, string $rawEml): FetchedEnvelope
     {
         $messageIdHeader = $message->getMessageId()->toString();
@@ -268,11 +292,7 @@ final class ImapCentralInboxClient implements CentralInboxClient
         $fromFirst = $fromAttribute->first();
         $from = is_object($fromFirst) && property_exists($fromFirst, 'mail') ? (string) $fromFirst->mail : '';
 
-        $dateAttribute = $message->getDate();
-        $dateFirst = $dateAttribute->first();
-        $receivedAt = is_object($dateFirst) && method_exists($dateFirst, 'toDate')
-            ? \DateTimeImmutable::createFromInterface($dateFirst->toDate())
-            : new \DateTimeImmutable();
+        $receivedAt = self::receivedAt($message);
 
         return new FetchedEnvelope(
             messageId: $messageId,
