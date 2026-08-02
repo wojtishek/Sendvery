@@ -29,9 +29,25 @@ use Ramsey\Uuid\UuidInterface;
  * user clicks, so quota would be the wrong cost lever. `explainReport` is
  * the user-initiated button, hence the per-call quota.
  *
- * Wired in `config/services.php` so the `AiInsightsService` interface
- * resolves to `PlanGatedAiInsightsService` wrapping `StubAiInsightsService`.
- * When real AI lands, only the inner binding changes.
+ * The plan gate answers "is this team entitled to AI". It cannot answer "is
+ * there an AI to reach", and those came apart: DEC-057 describes an unset
+ * ANTHROPIC_API_KEY as the switch that keeps AI unwired, but only
+ * StripePriceResolver ever read it — that gate decides what can be *bought*.
+ * Execution asked the plan alone, so any deployment whose plan says yes and
+ * whose key is empty called Anthropic with no credentials and took a 401 per
+ * insight. `Unlimited` makes that the default rather than the corner case:
+ * it is the staff-grant tier, hasAi() is true for it unconditionally, and it
+ * is what a self-hoster is told to set. Measured on one such instance: 151
+ * failed calls in thirty minutes, two messages dead in the failure transport.
+ *
+ * Remediation and sender labelling made it worse by not gating on plan at
+ * all — they fire per processed report, so the calls arrived whatever the
+ * team was paying for.
+ *
+ * So the inner service is now chosen by whether AI is configured, which is
+ * what this class's own wiring note always described: "only the inner
+ * binding changes". Unconfigured falls back to the stub, whose honest
+ * placeholder copy is exactly the pre-launch behaviour that binding had.
  */
 final readonly class PlanGatedAiInsightsService implements AiInsightsService
 {
@@ -40,6 +56,8 @@ final readonly class PlanGatedAiInsightsService implements AiInsightsService
         private TeamRepository $teams,
         private PlanEnforcement $enforcement,
         private PlanLimits $limits,
+        private AiInsightsService $unconfigured,
+        private bool $aiConfigured = false,
     ) {
     }
 
@@ -47,14 +65,14 @@ final readonly class PlanGatedAiInsightsService implements AiInsightsService
     {
         $this->assertPlanHasAi($teamId);
 
-        return $this->inner->generateWeeklyDigest($teamId);
+        return $this->reachable()->generateWeeklyDigest($teamId);
     }
 
     public function explainAnomaly(UuidInterface $reportId, UuidInterface $teamId): AnomalyExplanationResult
     {
         $this->assertPlanHasAi($teamId);
 
-        return $this->inner->explainAnomaly($reportId, $teamId);
+        return $this->reachable()->explainAnomaly($reportId, $teamId);
     }
 
     public function explainReport(UuidInterface $reportId, UuidInterface $teamId): OnDemandExplanationResult
@@ -74,7 +92,7 @@ final readonly class PlanGatedAiInsightsService implements AiInsightsService
             throw new AiQuotaExceeded(used: $this->enforcement->getOnDemandAiUsage($teamId->toString()), limit: $this->limits->getOnDemandAiQuota($plan));
         }
 
-        $result = $this->inner->explainReport($reportId, $teamId);
+        $result = $this->reachable()->explainReport($reportId, $teamId);
 
         $this->enforcement->incrementOnDemandAiUsage($teamId->toString());
 
@@ -86,7 +104,7 @@ final readonly class PlanGatedAiInsightsService implements AiInsightsService
         // Remediation guidance fires on a DNS-check trigger; the caller
         // resolves the domain's team and is responsible for skipping when
         // the plan has no AI. Stub passthrough — no quota involved.
-        return $this->inner->generateRemediationGuidance($domainId, $failure);
+        return $this->reachable()->generateRemediationGuidance($domainId, $failure);
     }
 
     public function labelSender(string $ip, string $domain): SenderLabelResult
@@ -94,7 +112,17 @@ final readonly class PlanGatedAiInsightsService implements AiInsightsService
         // Smart sender labeling runs against newly observed IPs across all
         // AI-enabled teams. The caller decides whether to enqueue work for
         // a given team. No quota — Haiku is cheap.
-        return $this->inner->labelSender($ip, $domain);
+        return $this->reachable()->labelSender($ip, $domain);
+    }
+
+    /**
+     * The service that can actually answer. Entitlement is decided by the
+     * plan; reachability is decided by whether a key was configured, and
+     * these two are not the same question.
+     */
+    private function reachable(): AiInsightsService
+    {
+        return $this->aiConfigured ? $this->inner : $this->unconfigured;
     }
 
     private function assertPlanHasAi(UuidInterface $teamId): SubscriptionPlan

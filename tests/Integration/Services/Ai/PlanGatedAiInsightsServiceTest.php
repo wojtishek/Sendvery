@@ -8,15 +8,24 @@ use App\Entity\Team;
 use App\Exceptions\AiNotEnabledForPlan;
 use App\Exceptions\AiQuotaExceeded;
 use App\Exceptions\ReportNotAnalyzable;
+use App\Repository\TeamRepository;
 use App\Services\Ai\AiInsightsService;
 use App\Services\Ai\CachingAiInsightsService;
 use App\Services\Ai\Input\DnsCheckFailure;
 use App\Services\Ai\PlanGatedAiInsightsService;
+use App\Services\Ai\Result\AnomalyExplanationResult;
+use App\Services\Ai\Result\OnDemandExplanationResult;
+use App\Services\Ai\Result\RemediationResult;
+use App\Services\Ai\Result\SenderLabelResult;
+use App\Services\Ai\Result\WeeklyDigestResult;
+use App\Services\Ai\StubAiInsightsService;
 use App\Services\Stripe\PlanEnforcement;
+use App\Services\Stripe\PlanLimits;
 use App\Tests\IntegrationTestCase;
 use App\Value\SubscriptionPlan;
 use Doctrine\ORM\EntityManagerInterface;
 use Ramsey\Uuid\Uuid;
+use Ramsey\Uuid\UuidInterface;
 
 final class PlanGatedAiInsightsServiceTest extends IntegrationTestCase
 {
@@ -27,6 +36,79 @@ final class PlanGatedAiInsightsServiceTest extends IntegrationTestCase
         // Caching is the outermost decorator: a cache hit returns before the
         // plan/quota gate is entered, so re-views cost nothing and burn no quota.
         self::assertInstanceOf(CachingAiInsightsService::class, $service);
+    }
+
+    public function testAnUnconfiguredKeyNeverReachesTheProvider(): void
+    {
+        $em = $this->getService(EntityManagerInterface::class);
+        $team = $this->createTeam($em, SubscriptionPlan::Unlimited);
+
+        self::assertSame(SubscriptionPlan::Unlimited, $team->getSubscriptionPlan());
+
+        $result = $this->withoutAnthropicKey()->labelSender('203.0.113.10', 'example.com');
+
+        // labelSender and generateRemediationGuidance carry no plan gate at all
+        // — they fire per processed report — so an unconfigured instance called
+        // Anthropic once per report and collected a 401 each time. The spy below
+        // throws if it is reached, which is the whole assertion.
+        self::assertNotSame('', $result->label);
+    }
+
+    public function testAnUnconfiguredKeyDoesNotLoosenThePlanGate(): void
+    {
+        $em = $this->getService(EntityManagerInterface::class);
+        $team = $this->createTeam($em, SubscriptionPlan::Free);
+
+        $this->expectException(AiNotEnabledForPlan::class);
+
+        // Entitlement and reachability are separate questions, and answering the
+        // second must not answer the first: a team that never bought AI is still
+        // refused, it just is not refused by a 401 from the provider.
+        $this->withoutAnthropicKey()->generateWeeklyDigest($team->id);
+    }
+
+    /**
+     * The service as a deployment with an empty ANTHROPIC_API_KEY builds it:
+     * the real client in place, but unreachable, and a spy standing in for it
+     * that fails the test if anything gets that far.
+     */
+    private function withoutAnthropicKey(): PlanGatedAiInsightsService
+    {
+        $neverCalled = new class () implements AiInsightsService {
+            public function generateWeeklyDigest(UuidInterface $teamId): WeeklyDigestResult
+            {
+                throw new \LogicException('Anthropic was called with no API key configured.');
+            }
+
+            public function explainAnomaly(UuidInterface $reportId, UuidInterface $teamId): AnomalyExplanationResult
+            {
+                throw new \LogicException('Anthropic was called with no API key configured.');
+            }
+
+            public function explainReport(UuidInterface $reportId, UuidInterface $teamId): OnDemandExplanationResult
+            {
+                throw new \LogicException('Anthropic was called with no API key configured.');
+            }
+
+            public function generateRemediationGuidance(UuidInterface $domainId, DnsCheckFailure $failure): RemediationResult
+            {
+                throw new \LogicException('Anthropic was called with no API key configured.');
+            }
+
+            public function labelSender(string $ip, string $domain): SenderLabelResult
+            {
+                throw new \LogicException('Anthropic was called with no API key configured.');
+            }
+        };
+
+        return new PlanGatedAiInsightsService(
+            inner: $neverCalled,
+            teams: $this->getService(TeamRepository::class),
+            enforcement: $this->getService(PlanEnforcement::class),
+            limits: $this->getService(PlanLimits::class),
+            unconfigured: new StubAiInsightsService(),
+            aiConfigured: false,
+        );
     }
 
     public function testExplainReportFailsWhenPlanHasNoAi(): void

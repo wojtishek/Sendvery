@@ -85,6 +85,14 @@ return App::config([
         'App\Services\Ai\PlanGatedAiInsightsService' => [
             'arguments' => [
                 '$inner' => '@App\Services\Ai\AnthropicAiInsightsService',
+                // DEC-057 calls an unset ANTHROPIC_API_KEY the switch that
+                // leaves AI unwired, but until now only StripePriceResolver
+                // read it — so execution reached Anthropic with no credentials
+                // and collected a 401 per insight. `Unlimited` grants hasAi()
+                // unconditionally, which makes that the normal state of a
+                // staff-granted or self-hosted instance rather than an edge.
+                '$unconfigured' => '@App\Services\Ai\StubAiInsightsService',
+                '$aiConfigured' => '%env(bool:ANTHROPIC_API_KEY)%',
             ],
         ],
         'App\Controller\Webhook\StripeWebhookController' => [
@@ -469,6 +477,13 @@ return App::config([
                 'public' => true,
                 'arguments' => [
                     '$inner' => '@App\Services\Ai\AnthropicAiInsightsService',
+                    // Bound explicitly, like $inner: leaving an AiInsightsService
+                    // argument to autowiring resolves it to the interface alias,
+                    // which is the decorator chain this service sits inside.
+                    '$unconfigured' => '@App\Services\Ai\StubAiInsightsService',
+                    // The suite exercises the configured path; the unconfigured
+                    // one is asserted by handing the service its own false.
+                    '$aiConfigured' => true,
                 ],
             ],
             'App\Services\Ai\CachingAiInsightsService' => [
